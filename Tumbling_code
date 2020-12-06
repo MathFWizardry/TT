@@ -8,8 +8,6 @@ Kd = 60 -- Derivative PID coefficient
 Ki = 0 -- Integral PID coefficient
 
 gFA = {} -- global forwards array
-D   = {} -- array of derivatives
-In  = {} -- array of integrals 
 
 switch = 0              -- This is used for setting the position of the craft at the current location
 largestDf = 0           --this is used so that the thrusters always fire at max where possible
@@ -39,7 +37,6 @@ function SortT(I,c)--Sorts the thrusters
     gFA[i][2] = gF.y
     gFA[i][3] = gF.z
     
-
   end
 end
 
