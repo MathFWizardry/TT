@@ -1,203 +1,148 @@
-H            = 10 -- Altitude setpoint (idle altitude)
-Hmin         = 16 -- minimum altitude during combat
-baloonDeploy = 8  -- altitude at which balloons deploy
+AltSetpoint = 40
+minAlt=18
 
---Set the PID coeffs in Update(I)
---Don't worry about the values below too much...
+globalPosSetpoint = {}
 
-integralScale = 0.001
-PIDvMAX       = 0.9 -- this is the maximum value for the pid lateral output
-Irange        = 0.2
-loop          = 0
-In   = {} --integral history
-D    = {} --derivative history
-gFA  = {} --global forwards array
-arr  = {}
-cOld = 0  --the old amount of thrusters
+Kp = 2 -- Proportional PID coefficient
+Kd = 60 -- Derivative PID coefficient
+Ki = 0 -- Integral PID coefficient
 
-function ArrayI(I,c) --initialises multidimensional arrays
+gFA = {} -- global forwards array
+D   = {} -- array of derivatives
+In  = {} -- array of integrals 
+
+switch = 0              -- This is used for setting the position of the craft at the current location
+largestDf = 0           --this is used so that the thrusters always fire at max where possible
+D = 0                   -- Saving the old process variable for the derivative calculation
+In = 0                  -- Saving the accumilated error for the integral calculation
+oldThrusterCount = 0    -- this is to prevent the code from crushing when thrusters are added or removed
+
+function ArrayI(I,c)    --Initialises the multidimensional array
 columns = 3
-rows    = c
-  
-  for i = 0,rows-1,1 do
-      gFA[i] = {}
-      In[i]  = {}
-      D[i]   = {}
-    for j = 0,columns-1,1 do 
-        gFA[i][j] = 0
-        In[i][j]  = 0
-        D[i][j]   = 0
+rows = c
+
+  for i = 0,rows do
+    gFA[i] = {}
+    for j = 1,columns do
+      gFA[i][j] = 0
     end
   end
 end
-
 
 function SortT(I,c)--Sorts the thrusters
 
-  for i=0,c-1,1 do
-    local inf = I:Component_GetBlockInfo(9,i)  --block info object
-    local lF  = inf.LocalForwards              --local forwards vector of the thruster
-    local gF  = inf.Forwards                   --global orientation of the thruster
+  for i = 0,c-1 do
+    inf = I:Component_GetBlockInfo(9,i) -- block info object
+    gF  = inf.Forwards                  -- global forwards vector of the thruster
 
     gFA[i][1] = gF.x
-    gFA[i][2] = gF.z
-    gFA[i][3] = gF.y
+    gFA[i][2] = gF.y
+    gFA[i][3] = gF.z
+    
 
   end
 end
 
-function DriveVel(I,c,i,MODE)--returns the pid output adjustment that takes velocity into account
-local vel = I:GetVelocityVector()
+function Drive(I,c)--setting the thruster drive/power fraction
 
-  if MODE == 0 then -- the purpose of this is to switch from seeking to no not seeking a target
-    vErr = Vector3.Dot(gFA[i],{-vel[1],-vel[3],-vel[2]})--drive fraction for a particular thruster
+enemies = I:GetNumberOfTargets(0)
+pos = I:GetConstructPosition()
+
+  if enemies ==0 then
+    if switch == 0 then
+      globalPosSetpoint = pos
+      globalPosSetpoint.y = AltSetpoint
+      switch = 1
+    end
   else
-  
-    targetInf = I:GetTargetInfo(0, 0)
-    targetPos = targetInf.Position
- 
-    relPos = targetPos-I:GetConstructPosition()
-    relPosN = Vector3.Normalize(relPos)
-
-    vErr = Vector3.Dot(gFA[i],{relPosN[1],relPosN[3],0})--drive fraction for a particular thruster, the second vector is
-    --flight dir in world coords x, z is parallel to the ground
+    globalPosSetpoint = I:GetTargetInfo(0, 0).Position
+    switch = 0
   end
 
-intV = In[i][2]--saved integral value
 
-  if (In[i][2])>Irange then--range of the integral value
-    In[i][2] =  Irange
-  elseif (In[i][2])<-Irange then
-    In[i][2] = -Irange
+pErr = globalPosSetpoint-pos -- position error as a vector
+pErrN = Vector3.Normalize(pErr) -- normalised position error vector
+pErrS = Vector3.Magnitude(pErr)/10 -- the range or scaling factor of the error
+
+  if pos.y < minAlt then
+    pErrN.y = 1
   end
 
-  derV = vErr-D[i][2]
-  PIDv = Pv*vErr+Iv*intV+Dv*derV
+velocity = I:GetVelocityVector() -- construct velocity
+velocityN = I:GetVelocityVectorNormalized() -- normalised construct velocity
+osciErr = I:GetVelocityMagnitude()  -- side to side oscillation error
 
---Saving integral and derivative data:  
-In[i][2]=In[i][2]+vErr*integralScale
-D[i][2]=vErr
+    der = osciErr - D -- derivative value
+    int = In 
+    D  = osciErr            -- saving the old value for the next loop
+    In = pErrS+In         -- updating the cumilative error
 
---Limiting PID value so that the altitude PID is not overwhelmed
-   if (PIDv)>=PIDvMAX then
-     PIDv = PIDvMAX
-   elseif (PIDv)<=0 then
-     PIDv = 0
-   end
+    PID      = Kp*pErrS+Ki*int
+    PIDosci  = Kd*der
+    totalPID = PIDosci+PID
 
-return PIDv
-end
+    if PID>1 then
+      PID = 1
+    elseif PID<0 then
+      PID = 0
+    end
 
-function GetOutOfW(I)
-baloons = I:Component_GetCount(0)
-  for i = 0,baloons,1 do
-    if I:GetConstructPosition().y<baloonDeploy then
-      I:Component_SetBoolLogic(0,i,true)
+    if PIDosci>1 then
+      PIDosci = 1
+    elseif PIDosci<0 then
+      PIDosci = 0
+    end
+    
+    InRange = 4000 -- this is used to regulate how large the integral can be so that it does not oversaturate the PID output
+    if In>InRange then
+      In = InRange
+    elseif In<-InRange then
+      In = -InRange
+    end
+
+  for i = 0,c-1 do
+
+    dF = Vector3.Dot(gFA[i],{pErrN.x*PID,pErrN.y*PID,pErrN.z*PID})
+    if enemies>0 then
+    if dF>largestDf then
+       largestDf = dF
+    end
+       scaleDf = 1/largestDf
     else
-      I:Component_SetBoolLogic(0,i,false)
+       scaleDf = 1
     end
-  end
-end
 
-function DriveAl(I,c,MODE)--setting the altitute drive
-
-local pos  = I:GetConstructPosition()
-local h    = pos.y  -- height
-
-  if MODE == 1 then  
-    ltargetInf = I:GetTargetInfo(0, 0)
-    ltargetPos = ltargetInf.Position
-    I:RequestComplexControllerStimulus(3)
-  end
-
-  if MODE == 0 then
-    hErr = H-h    -- height error
-  elseif MODE==1 and ltargetPos[2]<Hmin then
-    hErr = Hmin-h
-    I:LogToHud('min alt')
-  elseif MODE == 1 and ltargetPos[2]>Hmin then
-    hErr = ltargetPos[2]-h
-  end
-
-  for i = 0,c-1,1 do
-
-    local intZ = In[i][1]
-    local derZ = hErr-D[i][1]
-    
-    if (In[i][1])>Irange then
-      In[i][1] =  Irange
-    elseif (In[i][1])<-Irange then
-      In[i][1] = -Irange
+    if enemies==0 then
+      dFosci = Vector3.Dot(gFA[i],{-velocity.x*PIDosci,-velocity.y*PIDosci,-velocity.z*PIDosci})
+    else
+      dFosci = 0
     end
-    
-    PIDz = Pz*hErr+Iz*intZ+Dz*derZ
-  if PIDz<0 then
-    PIDz = 0
+
+    if dF>=1 then
+      dF = 1
+    elseif dF<=0 then
+      dF = 0
+    end
+
+    if dFosci>0.5 then
+      dFosci = 0.5
+    elseif dFosci<=0 then
+      dFosci = 0
+    end
+
+    I:Component_SetFloatLogic(9,i,dF*scaleDf+dFosci)
   end
-    dF = Vector3.Dot(gFA[i],{0,0,PIDz})--drive fraction
-
-     if (dF)>=1 then
-       dF =  1
-     elseif dF<=0 then
-       dF = 0
-     end
-     
-
-   dFv = DriveVel(I,c,i,MODE)--velocity drive fraction
-
-   I:Component_SetFloatLogic(9,i,dF+dFv)
-   In[i][1] = hErr*integralScale+In[i][1]
-   D[i][1]  = hErr
-
-  end
+    largestDf = 0
 end
-
 
 function Update(I)
-GetOutOfW(I)--getting out of water
-
-  if I:GetNumberOfTargets(0)==0 then
-    MODE   = 0 --0 means no enemies, just hang in the air. 1 means enemies, track them
-    Stable = 1 -- if 1 aircraft is stable of 0 it is not
-    Pz     = 1--0.05
-    Dz     = 0--3
-    Iz     = 0--50
-
-    Pv = 0.04
-    Dv = 0
-    Iv = 0.3
-
-  else
-    MODE = 1
-    Stable = 0 -- if 1 aircraft is stable of 0 it is not
-    Pz = 1
-    Dz = 0
-    Iz = 0--50
-
-    Pv = 2
-    Dv = 0--.02
-    Iv = 0--0.1
-  end
-
-I:RequestComplexControllerStimulus(1)
-
-  if Stable==1 then
-    I:RequestComplexControllerStimulus(10)
-  end
-
 c = I:Component_GetCount(9)
-
-  if loop == 0 then
-    cOld = c
+  if c~= oldThrusterCount then
+    oldThrusterCount =c
     ArrayI(I,c)
-    I:Log('arraying')
-    loop = 1
-  end
-
-  if cOld==c then
-    SortT(I,c)
-    DriveAl(I,c,MODE)
   else
-    loop = 0
+    SortT(I,c)
+    Drive(I,c)
   end
+I:RequestComplexControllerStimulus(1)
 end
