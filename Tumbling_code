@@ -101,12 +101,14 @@ osciErr = I:GetVelocityMagnitude()  -- side to side oscillation error
 
     dF = Vector3.Dot(gFA[i],{pErrN.x*PID,pErrN.y*PID,pErrN.z*PID})
     if enemies>0 then
-    if dF>largestDf then
-       largestDf = dF
-    end
-       scaleDf = 1/largestDf
-    else
-       scaleDf = 1
+      
+      if dF>largestDf then
+        largestDf = dF
+      end
+      
+      scaleDf = 1/largestDf
+      else
+        scaleDf = 1
     end
 
     if enemies==0 then
